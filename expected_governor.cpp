@@ -3,13 +3,16 @@
  *
  *  Created on: May 12, 2016
  *      Author: ytdu
+ *
+ *  The algorithms implemented in this code (parse_forest::to_headed(), parse_forest::inside(), parse_forest::flow(), parse_forest::find_expected_governor()) are from:
+ * Helmut Schmid and Mats Rooth: Parse forest Computation of Expected Governors. ACL'2001
  */
 
 #include<iostream>
 #include<sstream>
 #include<cmath>
 
-#include "expected_governor_ytdu.h"
+#include "expected_governor.h"
 
 namespace nlu {
 std::vector<std::string> label_map;
@@ -20,19 +23,15 @@ std::istream& operator>>(std::istream& in, parse_node& node) {
 	in >> node.index >> c >> node.span_l >> node.span_r >> node.label_index >> node.is_upper >> node.is_basic_unit;
 	return in;
 }
-
 std::ostream& operator<<(std::ostream& out, const parse_node& node){
 	out << node.index << ": " << node.span_l << " " << node.span_r << " " << node.label_index << " " << node.is_upper << " " << node.is_basic_unit << std::endl;
 	return out;
 }
 
 std::istream& operator>>(std::istream& in, parse_rule& rule) {
-//	char s[MAX_RULE_LEN];
 	rule.rhs2 = -1;
 	std::string s;
 	std::getline(in, s);
-//	in.getline(s, MAX_RULE_LEN);
-//	std::cout<<s<<std::endl;
 	int num_space = 0;
 	int i = 0;
 	while (s[i]) {
@@ -153,19 +152,21 @@ parse_forest parse_forest::to_headed(){
 	ret.tokens = tokens;
 	ret.nodes = nodes;
 	ret.heads = std::vector<std::vector<parse_node*> >(ret.nodes.size(), std::vector<parse_node*>());
+
+	// for each terminal symbol, the head is itself.
 	for (int i = 0; i < ret.nodes.size(	); ++i) {
-//		ret.heads.push_back(std::vector<parse_node*>());
 		if (ret.nodes[i].is_basic_unit) {
 			ret.heads[i].push_back(&ret.nodes[i]);
 		}
 	}
+
+	// for each rule in bottom-up order, split the parent symbol for all the possible combination of its children.
 	for (parse_rule r : rules) {
 		int head_rhs = 0;
 		if (r.rhs2 != -1) {
 			std::string str_r = label_map[nodes[r.lhs].label_index] + "^" + label_map[nodes[r.rhs1].label_index] + "^" + label_map[nodes[r.rhs2].label_index];
 			head_rhs = headrules_map[str_r];
 		}
-//		std::cout<< head_rhs<<std::endl;
 		for (int i = 0; i < ret.heads[r.rhs1].size(); ++i) {
 			parse_node* rhs_head = ret.heads[r.rhs1][i];
 			if (r.rhs2 == -1) {
@@ -206,61 +207,44 @@ void parse_forest::inside() {
 		return;
 	}
 	inside_scores = std::vector<std::vector<double> >(heads.size(), std::vector<double>());
+	// the inside scores of the terminals are 0.
 	for (int i = 0; i < heads.size(); ++i) {
 		inside_scores[i] = std::vector<double>(heads[i].size(), INIT_SCORE);
 		if (nodes[i].is_basic_unit) {
-//			std::cout << heads[i].size() << std::endl;
 			inside_scores[i][0] = 0.0;
 		}
 	}
+	// inside algorithm
 	for (parse_rule& r : rules) {
 		r.inside_score = r.log_prob + inside_scores[r.rhs1][r.rhs1_head];
 		if (r.rhs2 != -1) {
 			r.inside_score += inside_scores[r.rhs2][r.rhs2_head];
 		}
-//		if (r.inside_score > 0) {
-//			std::cout<<r.inside_score << std::endl;
-//			std::cout<< r.log_prob <<std::endl;
-//			std::cout<< inside_scores[r.rhs1][r.rhs1_head] << std::endl;
-//			std::cout<< inside_scores[r.rhs2][r.rhs2_head] << std:: endl;
-//			exit(-1);
-//		}
-//		std::cout << r.inside_score << std::endl;
 		if (inside_scores[r.lhs][r.lhs_head] == INIT_SCORE) {
 			inside_scores[r.lhs][r.lhs_head] = r.inside_score;
 		} else {
 			inside_scores[r.lhs][r.lhs_head] = std::log(std::exp(inside_scores[r.lhs][r.lhs_head]) + std::exp(r.inside_score));
 		}
 	}
-//	for (int i = 0; i < inside_scores.size(); ++i) {
-//		auto v = inside_scores[i];
-//		std::cout << "<" << nodes[i].span_l << ", " << nodes[i].span_r << ">: " << std::endl;
-//		for (auto t : v) {
-//			std::cout << t <<std::endl;
-//		}
-//	}
 }
 
 void parse_forest::flow(){
 	if (inside_scores.empty() && !rules.empty()) {
-//		std::cout << words.size() << std::endl;
 		std::cerr<< "parse_forest.inside() should be called first.  -- parse_forest.flow()" << std::endl;
 		return;
 	}
 	flow_scores = std::vector<std::vector<double> >(heads.size(), std::vector<double>());
+	// accumulate all the root inside scores.
     double all_score = 0;
 	for (int i = 0; i < heads.size(); ++i) {
 		flow_scores[i] = std::vector<double>(heads[i].size(), INIT_SCORE);
 		if (nodes[i].is_upper && nodes[i].span_l == 0 && nodes[i].span_r == tokens.size()) {
-			//flow_scores[i] = std::vector<double>(heads[i].size(), 0.0);
             for (int j = 0; j < inside_scores[i].size(); ++j) {
                 all_score += std::exp(inside_scores[i][j]);
             }
 		}
-        //else {
-			//flow_scores[i] = std::vector<double>(heads[i].size(), INIT_SCORE);
-		//}
 	}
+	// normalize the root inside scores for flow scores.
     all_score = std::log(all_score);
     for (int i = 0; i < heads.size(); ++i) {
 		if (nodes[i].is_upper && nodes[i].span_l == 0 && nodes[i].span_r == tokens.size()) {
@@ -269,28 +253,35 @@ void parse_forest::flow(){
             }
         }
     }
-        
+    // flow algorithm
 	for (int i = rules.size() - 1; i >= 0; --i) {
 		parse_rule& r = rules[i];
 		r.flow_score = r.inside_score - inside_scores[r.lhs][r.lhs_head] + flow_scores[r.lhs][r.lhs_head];
-//		std::cout << r.flow_score << std::endl;
-//		parse_node n = nodes[r.lhs];
-//		std::cout << "r inside:" << r.inside_score << std::endl;
-//		std::cout << "lhs inside:" << inside_scores[r.lhs][r.lhs_head] << std::endl;
-//		std::cout << "lhs flow:" << flow_scores[r.lhs][r.lhs_head] << std::endl;
-//		std::cout << "<" << n.span_l << " " << n.span_r << ">: " << r.lhs << std::endl;
+
+//		if (debug) {
+//			std::cout << r.flow_score << std::endl;
+//			parse_node n = nodes[r.lhs];
+//			std::cout << "r inside:" << r.inside_score << std::endl;
+//			std::cout << "lhs inside:" << inside_scores[r.lhs][r.lhs_head] << std::endl;
+//			std::cout << "lhs flow:" << flow_scores[r.lhs][r.lhs_head] << std::endl;
+//			std::cout << "<" << n.span_l << " " << n.span_r << ">: " << r.lhs << std::endl;
+//		}
+
 		if (flow_scores[r.rhs1][r.rhs1_head] == INIT_SCORE) {
 			flow_scores[r.rhs1][r.rhs1_head] = r.flow_score;
 		} else {
             double tmp = flow_scores[r.rhs1][r.rhs1_head];
 			flow_scores[r.rhs1][r.rhs1_head] = std::log(std::exp(flow_scores[r.rhs1][r.rhs1_head]) + std::exp(r.flow_score));
-//			if (flow_scores[r.rhs1][r.rhs1_head] > EPS) {
-//				std::cout << flow_scores[r.rhs1][r.rhs1_head] << std::endl;
-//				parse_node n = nodes[r.lhs];
-//				std::cout << "r flow:" << r.flow_score << std::endl;
-//				std::cout << "rhs1 flow:" << tmp << std::endl;
-//				std::cout << "<" << n.span_l << " " << n.span_r << ">" << std::endl;
-//				exit(-1);
+
+//			if (debug) {
+//				if (flow_scores[r.rhs1][r.rhs1_head] > EPS) {
+//					std::cout << flow_scores[r.rhs1][r.rhs1_head] << std::endl;
+//					parse_node n = nodes[r.lhs];
+//					std::cout << "r flow:" << r.flow_score << std::endl;
+//					std::cout << "rhs1 flow:" << tmp << std::endl;
+//					std::cout << "<" << n.span_l << " " << n.span_r << ">" << std::endl;
+//					exit(-1);
+//				}
 //			}
 		}
 		if (r.rhs2 != -1) {
@@ -299,24 +290,31 @@ void parse_forest::flow(){
 			} else {
                 double tmp = flow_scores[r.rhs2][r.rhs2_head];
 				flow_scores[r.rhs2][r.rhs2_head] = std::log(std::exp(flow_scores[r.rhs2][r.rhs2_head]) + std::exp(r.flow_score));
-//				if (flow_scores[r.rhs2][r.rhs2_head] > EPS) {
-//					std::cout << flow_scores[r.rhs2][r.rhs2_head] << std::endl;
-//					parse_node n = nodes[r.lhs];
-//                    std::cout << "r flow:" << r.flow_score << std::endl;
-//					std::cout << "rhs2 flow:" << tmp << std::endl;
-//					std::cout << "<" << n.span_l << " " << n.span_r << ">" << std::endl;
-//					exit(-1);
+
+//				if(debug) {
+//					if (flow_scores[r.rhs2][r.rhs2_head] > EPS) {
+//						std::cout << flow_scores[r.rhs2][r.rhs2_head] << std::endl;
+//						parse_node n = nodes[r.lhs];
+//						std::cout << "r flow:" << r.flow_score << std::endl;
+//						std::cout << "rhs2 flow:" << tmp << std::endl;
+//						std::cout << "<" << n.span_l << " " << n.span_r << ">" << std::endl;
+//						exit(-1);
+//					}
 //				}
 			}
 		}
 	}
-//	for (int i = 0; i < flow_scores.size(); ++i) {
-//		auto v = flow_scores[i];
-//		std::cout << "<" << nodes[i].span_l << ", " << nodes[i].span_r << ">: " << std::endl;
-//		for (auto t : v) {
-//			std::cout << t <<std::endl;
-//		}
-//	}
+
+	if (debug) {
+		std::cout << "flow scores:" << std::endl;
+		for (int i = 0; i < flow_scores.size(); ++i) {
+			auto v = flow_scores[i];
+			std::cout << "<" << nodes[i].span_l << ", " << nodes[i].span_r << ">: " << std::endl;
+			for (auto t : v) {
+				std::cout << t <<std::endl;
+			}
+		}
+	}
 }
 
 void add_governors(expected_governor& eg1, const expected_governor& eg2) {
@@ -343,6 +341,7 @@ void parse_forest::find_expected_governor(){
 		return;
 	}
 	e_governors = std::vector<std::vector<expected_governor> >(heads.size(), std::vector<expected_governor>());
+	// initialize the expected governor of the roots
 	for (int i = 0; i < heads.size(); ++i) {
 		e_governors[i] = std::vector<expected_governor>(heads[i].size(), expected_governor());
 		if (nodes[i].is_upper && nodes[i].span_l == 0 && nodes[i].span_r == tokens.size()) {
@@ -352,6 +351,7 @@ void parse_forest::find_expected_governor(){
 			}
 		}
 	}
+	// for each rule in top-down order, pass down the expected governor
 	for (int i = rules.size() - 1; i >= 0; --i) {
 		parse_rule& r = rules[i];
 		expected_governor new_e_governor;

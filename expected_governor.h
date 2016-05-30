@@ -1,223 +1,109 @@
-// Copyright MISingularity.io
-// All right reserved.
-// Author: jiahua.liu@misigularity.io (Liu Jiahua)
+/*
+ * expected_governor_ytdu.h
+ *
+ *  Created on: May 12, 2016
+ *      Author: ytdu
+ */
 
-// 
-// Implementation of computation of expected governor given a sentence and the corresponding parsed forest.
-//
-// Assume that the nodes in parsed_forest.h is sorted by the length of the span 
-// (e.g. (1,1), (2,2), ..., (n,n), (1,2), (2,3), ..., (n-1, n), ......, (1,n)) 
-//
+#ifndef EXPECTED_GOVERNOR_YTDU_H_
+#define EXPECTED_GOVERNOR_YTDU_H_
 
-#ifndef NLU_CRF_EXPECTED_GOVERNOR_H__
-#define NLU_CRF_EXPECTED_GOVERNOR_H__
+#include<vector>
+#include<unordered_map>
+#include<string>
 
-#define LABEL_NOT_KNOWN_YET -1
-#define HEADWORD_NOT_KNOWN_YET "TBD"
+#define EPS 1e-9
+#define INIT_SCORE 1.0
+#define START_SYMBOL "#START#"
 
-#include <vector>
-#include <string>
+extern bool debug;
+namespace nlu {
 
-#include "parse_forest.pb.h"
+extern std::vector<std::string> label_map;
+extern std::unordered_map<std::string, int> headrules_map;
 
-namespace nlu  {
+/* The governor of a terminal symbol v
+ */
+class governor {
+public:
+	int u; // the highest node with head v
+	int u_head; // the head of u, namely v
+	int u_prime = -1; // the parent of u
+	int u_prime_head = -1; // the head of u_prime
+	governor(int u, int u_head) : u(u), u_head(u_head) {}
+	governor(int u, int u_head, int u_prime, int u_prime_head) : u(u), u_head(u_head), u_prime(u_prime), u_prime_head(u_prime_head) {}
 
-struct GovernorMarkup {
-  int label_u;
-  int label_parent_of_u;
-  std::string headword_parent_of_u;
-  float probability;
+	bool operator==(const governor &other) const {
+		return u == other.u && u_head == other.u_head && u_prime == other.u_prime && u_prime_head == other.u_prime_head;
+	}
+};
 
-  GovernorMarkup()
-    : label_u(LABEL_NOT_KNOWN_YET), label_parent_of_u(LABEL_NOT_KNOWN_YET),
-      headword_parent_of_u(HEADWORD_NOT_KNOWN_YET), probability(1.0) {}
-  GovernorMarkup(int lu, int lup, std::string hup, float p)
-    : label_u(lu), label_parent_of_u(lup),
-      headword_parent_of_u(hup), probability(p) {}
-}; 
+class governor_hash{
+public:
+    size_t operator()(const governor &g) const
+    {
+        size_t h1 = std::hash<int>()(g.u);
+        size_t h2 = std::hash<int>()(g.u_head);
+        size_t h3 = std::hash<int>()(g.u_prime);
+        size_t h4 = std::hash<int>()(g.u_prime_head);
+        return h1 ^ ( h2 << 1 ) ^ (h3 << 2) ^ (h4 << 3);
+    }
+};
 
-bool operator==(const GovernorMarkup& lhs, const GovernorMarkup& rhs) {
-    return lhs.label_u == rhs.label_u &&
-           lhs.label_parent_of_u == rhs.label_parent_of_u &&
-           lhs.headword_parent_of_u == rhs.headword_parent_of_u;
+typedef std::unordered_map<governor, double, governor_hash> expected_governor;
+
+class parse_node {
+public:
+	int index = -1;
+	int span_l = -1;
+	int span_r = -1;
+	int label_index = -1;
+	bool is_upper = 0;
+	bool is_basic_unit = 0;
+};
+std::istream& operator>>(std::istream& in, parse_node& node);
+std::ostream& operator<<(std::ostream& out, const parse_node& node);
+
+class parse_rule {
+public:
+	int lhs = -1, lhs_head = -1;
+	int rhs1 = -1, rhs1_head = -1;
+	int rhs2 = -1, rhs2_head = -1;
+	double log_prob = 0.0;
+	double inside_score = 0.0;
+	double flow_score = 0.0;
+	expected_governor e_governor;
+};
+std::istream& operator>>(std::istream& in, parse_rule& node);
+std::ostream& operator<<(std::ostream& out, const parse_rule& rule);
+
+/* The parse forest
+ */
+class parse_forest {
+public:
+	bool is_headed = false;
+	int n_basic_units;
+	std::vector<std::string> tokens;
+	std::vector<parse_node> nodes;
+	std::vector<parse_rule> rules;
+
+    // The following fields are not empty only when parse_forest::is_headed is true.
+    // Each element in parse_forest::nodes are splitted into several headed nodes, whose heads are parse_forest::heads.
+    // Each headed node has an inside score, a flow score, and an expected governor.
+	std::vector<std::vector<parse_node*> > heads;
+	std::vector<std::vector<double> > inside_scores;
+	std::vector<std::vector<double> > flow_scores;
+	std::vector<std::vector<expected_governor> > e_governors;
+
+	void clear();
+	parse_forest to_headed();
+	void inside();
+	void flow();
+	void find_expected_governor();
+};
+std::istream& operator>>(std::istream& in, parse_forest& forest);
+std::ostream& operator<<(std::ostream& out, const parse_forest& forest);
+
 }
 
-
-struct GovernorsPerWord {
-  int idx;
-  std::vector<GovernorMarkup> gms;
-};
-
-
-class GovernorFinder {
- public:
-  GovernorFinder(ForestSentence* forestSentence, bool print_debug_info = false) {
-    fs = forestSentence;
-    // initialize
-    for (int i = 0; i < fs->forest().nodes_size(); i++) {
-      std::vector<GovernorsPerWord> v;
-      for (int j = 0; j < fs->basic_units_size(); j++) {
-        GovernorsPerWord gpw;
-        gpw.idx = j;
-        v.push_back(gpw);
-      }
-      governors.push_back(v);
-    }
-
-    for (int i = 0; i < fs->forest().nodes_size(); i++) {
-      const NodeInfo& node = fs->forest().nodes(i);
-      if (node.basic_unit() == 1 && node.upper() == 0) {
-        int bu_idx = -1;
-        for (int j = 0; j < fs->basic_units_size(); j++) {
-          if (fs->basic_units(j).start() == node.start()
-              && fs->basic_units(j).end() == node.end()) {
-            bu_idx = j;
-            break;
-          }
-        }
-        GovernorMarkup m;
-        governors[i][bu_idx].gms.push_back(m);
-      }
-    }
-
-    // compute expected governor markup using a CKY-like algorithm
-    for (int i = 0; i < fs->forest().nodes_size(); i++) {
-      // compute expected governor for node i
-      for (int j = fs->forest().starting_indexes(i);
-           j < fs->forest().starting_indexes(i+1); j++) {
-        // for each hyper edge (rule) expanding node i
-        const HyperEdgeInfo& edge = fs->forest().edges(j);
-        if (edge.tail_idx_size() == 2) {
-          // binary rule
-          int c1 = edge.tail_idx(0), c2 = edge.tail_idx(1);
-          // left child
-          for (int k = 0; k < fs->basic_units_size(); k++) {
-            updateGovernorGivenChild(i, c1, k, true, edge.merit());
-          }
-          // right child
-          for (int k = 0; k < fs->basic_units_size(); k++) {
-            updateGovernorGivenChild(i, c2, k, true, edge.merit());
-          }
-        }
-        else {
-          // unary Rule
-          int c = edge.tail_idx(0);
-          for (int k = 0; k < fs->basic_units_size(); k++) {
-            updateGovernorGivenChild(i, c, k, false, edge.merit());
-          }
-        }
-      }
-
-      for (size_t j = 0; j < governors[i].size(); j++) {
-        float sum = 0.0;
-        for (size_t k = 0; k < governors[i][j].gms.size(); k++) {
-          sum += governors[i][j].gms[k].probability;
-        }
-        for (size_t k = 0; k < governors[i][j].gms.size(); k++) {
-          governors[i][j].gms[k].probability /= sum;
-        }
-      }
-
-      if (print_debug_info) {
-        printf("\n");
-        printf("idx=%d: stt=%d end=%d lbl=%d upper=%d head_stt=%d head_end=%d\n",
-               i, fs->forest().nodes(i).start(), fs->forest().nodes(i).end(),
-               fs->forest().nodes(i).label(), fs->forest().nodes(i).upper(),
-               fs->forest().nodes(i).headword_stt(),
-               fs->forest().nodes(i).headword_end());
-        for (size_t j = 0; j < governors[i].size(); j++) {
-          for (size_t k = 0; k < governors[i][j].gms.size(); k++) {
-            printf("%zu: %d %d %s %f\n", j, governors[i][j].gms[k].label_u,
-                   governors[i][j].gms[k].label_parent_of_u,
-                   governors[i][j].gms[k].headword_parent_of_u.c_str(),
-                   governors[i][j].gms[k].probability);
-          }
-        }
-        printf("\n");
-      }
-    }
-  }
-
-  // update expected governor of a particular basic unit (identified by bu_idx)
-  // for parent node given one child node
-  void updateGovernorGivenChild(int pidx, int cidx, int bu_idx,
-                                bool binary_rule, float weight) {
-    const NodeInfo& parent = fs->forest().nodes(pidx);
-    const NodeInfo& child = fs->forest().nodes(cidx);
-    for (size_t i = 0; i < governors[cidx][bu_idx].gms.size(); i++) {
-      // for each possible governor markup of this position for child node
-      GovernorMarkup m;
-      if (binary_rule) {
-        // binary rule
-        if ((governors[cidx][bu_idx].gms[i].label_parent_of_u == LABEL_NOT_KNOWN_YET)
-           && (child.headword_stt() != parent.headword_stt()
-               || child.headword_end() != parent.headword_end())) {
-          // If the head word of child node is not the head word of parent node,
-          // and the governor of this position for child node is not known yet,
-          // (which means the word of this position is the head word of child
-          // node) get the governor of this position for parent node according
-          // to definition
-          m.label_u = child.label();
-          m.label_parent_of_u = parent.label();
-          m.headword_parent_of_u = "";
-          for (int j = parent.headword_stt(); j < parent.headword_end(); j++) {
-            m.headword_parent_of_u += fs->tokens(j);
-          }
-          m.probability = governors[cidx][bu_idx].gms[i].probability * weight;
-        }
-        else {
-          // Otherwise, the governor of this position remains the same
-          m = governors[cidx][bu_idx].gms[i];
-          m.probability *= weight;
-        }
-      }
-      else {
-        // unary rule
-        if (child.headword_stt() != parent.headword_stt()
-            || child.headword_end() != parent.headword_end()) {
-          // Get governor markup for the main verb, when process the topmost
-          // rule, like START_SYMBOL -> S
-          m.label_u = child.label();
-          m.label_parent_of_u = parent.label();
-          m.headword_parent_of_u = "";
-          for (int j = parent.headword_stt(); j < parent.headword_end(); j++) {
-            m.headword_parent_of_u += fs->tokens(j);
-          }
-          m.probability = governors[cidx][bu_idx].gms[i].probability * weight;
-        }
-        else {
-          // In normal situation, governor markup just remains the same for
-          // unary rule
-          m = governors[cidx][bu_idx].gms[i];
-          m.probability *= weight;
-        }
-      }
-      // update governor markup for parent node
-      bool exist = false;
-      for (size_t j = 0; j < governors[pidx][bu_idx].gms.size(); j++) {
-        if (m == governors[pidx][bu_idx].gms[j]) {
-          governors[pidx][bu_idx].gms[j].probability += m.probability;
-          exist = true;
-          break;
-        }
-      }
-      if (!exist) {
-        governors[pidx][bu_idx].gms.push_back(m);
-      }
-    }
-  }
-
-  std::vector<std::vector<GovernorsPerWord> > GetGovernors() {
-    return governors;
-  }
-
- private:
-  ForestSentence* fs;
-  // the first dimension indicates idx of node, and the second dimension
-  // indicates idx of basic unit
-  std::vector<std::vector<GovernorsPerWord> > governors;
-};
-
-} // namespace nlu
-
-#endif
+#endif /* EXPECTED_GOVERNOR_YTDU_H_ */
